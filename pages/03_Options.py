@@ -7,6 +7,8 @@ import streamlit as st
 
 st.set_page_config(page_title="Options", page_icon="🎯", layout="wide")
 
+# ---------- Config ----------
+
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
 
 POPULAR_SYMBOLS = [
@@ -24,6 +26,8 @@ HEADERS = {
 }
 
 
+# ---------- NSE Fetch ----------
+
 def get_nse_session():
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -37,9 +41,8 @@ def fetch_option_chain(symbol: str):
 
     warmup_urls = [
         "https://www.nseindia.com/",
-        "https://www.nseindia.com/option-chain"
+        "https://www.nseindia.com/option-chain",
     ]
-
     for warmup_url in warmup_urls:
         try:
             session.get(warmup_url, timeout=20)
@@ -64,12 +67,22 @@ def fetch_option_chain(symbol: str):
     raise last_error
 
 
+# ---------- Parsing ----------
+
 def parse_option_chain(data, selected_expiry=None):
-    records = data.get("records", {})
-    underlying_value = records.get("underlyingValue")
-    timestamp = records.get("timestamp")
-    expiry_dates = records.get("expiryDates", [])
-    raw_data = records.get("data", [])
+    records = data.get("records", {}) or {}
+    filtered = data.get("filtered", {}) or {}
+
+    underlying_value = records.get("underlyingValue") or filtered.get("underlyingValue")
+    timestamp = records.get("timestamp") or filtered.get("timestamp")
+
+    expiry_dates = records.get("expiryDates") or filtered.get("expiryDates") or []
+    raw_data = records.get("data") or filtered.get("data") or []
+
+    if not expiry_dates and raw_data:
+        expiry_dates = sorted(
+            list({item.get("expiryDate") for item in raw_data if item.get("expiryDate")})
+        )
 
     if not expiry_dates:
         return pd.DataFrame(), underlying_value, timestamp, []
@@ -86,38 +99,38 @@ def parse_option_chain(data, selected_expiry=None):
         ce = item.get("CE", {}) or {}
         pe = item.get("PE", {}) or {}
 
-        rows.append({
-            "strikePrice": strike,
-
-            "CE_OI": ce.get("openInterest"),
-            "CE_Chg_OI": ce.get("changeinOpenInterest"),
-            "CE_Volume": ce.get("totalTradedVolume"),
-            "CE_IV": ce.get("impliedVolatility"),
-            "CE_LTP": ce.get("lastPrice"),
-            "CE_BidQty": ce.get("bidQty"),
-            "CE_BidPrice": ce.get("bidprice"),
-            "CE_AskPrice": ce.get("askPrice"),
-            "CE_AskQty": ce.get("askQty"),
-
-            "PE_BidQty": pe.get("bidQty"),
-            "PE_BidPrice": pe.get("bidprice"),
-            "PE_AskPrice": pe.get("askPrice"),
-            "PE_AskQty": pe.get("askQty"),
-            "PE_LTP": pe.get("lastPrice"),
-            "PE_IV": pe.get("impliedVolatility"),
-            "PE_Volume": pe.get("totalTradedVolume"),
-            "PE_Chg_OI": pe.get("changeinOpenInterest"),
-            "PE_OI": pe.get("openInterest"),
-        })
+        rows.append(
+            {
+                "strikePrice": strike,
+                "CE_OI": ce.get("openInterest"),
+                "CE_Chg_OI": ce.get("changeinOpenInterest"),
+                "CE_Volume": ce.get("totalTradedVolume"),
+                "CE_IV": ce.get("impliedVolatility"),
+                "CE_LTP": ce.get("lastPrice"),
+                "CE_BidQty": ce.get("bidQty"),
+                "CE_BidPrice": ce.get("bidprice"),
+                "CE_AskPrice": ce.get("askPrice"),
+                "CE_AskQty": ce.get("askQty"),
+                "PE_BidQty": pe.get("bidQty"),
+                "PE_BidPrice": pe.get("bidprice"),
+                "PE_AskPrice": pe.get("askPrice"),
+                "PE_AskQty": pe.get("askQty"),
+                "PE_LTP": pe.get("lastPrice"),
+                "PE_IV": pe.get("impliedVolatility"),
+                "PE_Volume": pe.get("totalTradedVolume"),
+                "PE_Chg_OI": pe.get("changeinOpenInterest"),
+                "PE_OI": pe.get("openInterest"),
+            }
+        )
 
     df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("strikePrice").reset_index(drop=True)
 
-    if df.empty:
-        return df, underlying_value, timestamp, expiry_dates
-
-    df = df.sort_values("strikePrice").reset_index(drop=True)
     return df, underlying_value, timestamp, expiry_dates
 
+
+# ---------- Payoff ----------
 
 def option_intrinsic(option_type, spot, strike):
     if option_type == "CE":
@@ -148,6 +161,8 @@ def compute_payoff(legs_df, spot_reference, lot_size=1):
     return pd.DataFrame({"UnderlyingPrice": prices, "PnL": pnl_list})
 
 
+# ---------- UI: Header ----------
+
 st.title("🎯 Options Strategy Builder")
 st.caption("Search a stock or index, view NSE option chain, and build payoff charts.")
 
@@ -157,23 +172,56 @@ with st.sidebar:
     custom_symbol = st.text_input("Or type symbol", value=selected_symbol)
     symbol = custom_symbol.upper().strip() if custom_symbol else selected_symbol
 
+# ---------- Fetch & parse with diagnostics ----------
+
 with st.spinner(f"Fetching option chain for {symbol}..."):
     try:
         option_chain_json = fetch_option_chain(symbol)
-        temp_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json)
-
-        if not expiry_dates:
-            st.error(f"No expiry dates found for {symbol}.")
-            st.stop()
-
-        selected_expiry = st.sidebar.selectbox("Expiry", expiry_dates, index=0)
-        chain_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json, selected_expiry)
-
     except Exception as e:
-        st.error(f"NSE option-chain fetch failed for {symbol}. This is usually a temporary NSE timeout or session issue.")
+        st.error(
+            f"NSE option-chain fetch failed for {symbol}. "
+            "This is usually a temporary NSE timeout or session issue."
+        )
         st.caption(str(e))
-        st.info("Try again in a few seconds. If it keeps failing, switch symbol once and return to NIFTY.")
+        st.info(
+            "Try again in a few seconds. If it keeps failing, switch symbol once "
+            "and return to NIFTY or BANKNIFTY."
+        )
         st.stop()
+
+# Debug expander to inspect raw response shape
+with st.expander("Debug: NSE raw response (for troubleshooting)", expanded=False):
+    st.write("Top-level keys:", list(option_chain_json.keys()))
+    st.write("records keys:", list((option_chain_json.get("records") or {}).keys()))
+    st.write("filtered keys:", list((option_chain_json.get("filtered") or {}).keys()))
+    st.write("records.expiryDates:", (option_chain_json.get("records") or {}).get("expiryDates"))
+    st.write("filtered.expiryDates:", (option_chain_json.get("filtered") or {}).get("expiryDates"))
+
+temp_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json)
+
+if not expiry_dates:
+    st.error(
+        f"NSE returned no expiry dates for {symbol}. "
+        "This is usually a transient response issue on the NSE side."
+    )
+    st.info(
+        "You can view the raw response in the Debug section above. "
+        "Try refreshing, or changing the symbol to another index/stock and then back."
+    )
+    st.stop()
+
+selected_expiry = st.sidebar.selectbox("Expiry", expiry_dates, index=0)
+chain_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(
+    option_chain_json, selected_expiry
+)
+
+if chain_df.empty:
+    st.error(
+        f"NSE returned no option rows for {symbol} on expiry {selected_expiry}."
+    )
+    st.stop()
+
+# ---------- Chain + ATM snapshot ----------
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Underlying", symbol)
@@ -181,11 +229,6 @@ c2.metric("Spot", f"{spot_price:,.2f}" if spot_price else "N/A")
 c3.metric("Timestamp", chain_timestamp if chain_timestamp else "N/A")
 
 st.subheader(f"Option Chain — {symbol} — {selected_expiry}")
-
-if chain_df.empty:
-    st.warning("No option chain rows available for the selected expiry.")
-    st.stop()
-
 st.dataframe(chain_df, use_container_width=True, height=520)
 
 atm_idx = (chain_df["strikePrice"] - spot_price).abs().idxmin() if spot_price else 0
@@ -202,6 +245,9 @@ a4.metric(
 )
 
 st.divider()
+
+# ---------- Strategy builder ----------
+
 st.subheader("Build Strategy")
 
 if "option_legs" not in st.session_state:
@@ -230,15 +276,17 @@ with st.form("add_leg_form"):
     add_leg = st.form_submit_button("Add Leg")
 
 if add_leg:
-    st.session_state["option_legs"].append({
-        "Type": leg_type,
-        "Side": leg_side,
-        "Strike": float(leg_strike),
-        "Qty": int(leg_qty),
-        "Premium": float(leg_premium),
-        "Expiry": selected_expiry,
-        "Underlying": symbol
-    })
+    st.session_state["option_legs"].append(
+        {
+            "Type": leg_type,
+            "Side": leg_side,
+            "Strike": float(leg_strike),
+            "Qty": int(leg_qty),
+            "Premium": float(leg_premium),
+            "Expiry": selected_expiry,
+            "Underlying": symbol,
+        }
+    )
 
 legs_df = pd.DataFrame(st.session_state["option_legs"])
 
@@ -262,24 +310,27 @@ with right:
         payoff_df = compute_payoff(legs_df, spot_reference=float(spot_price), lot_size=1)
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=payoff_df["UnderlyingPrice"],
-            y=payoff_df["PnL"],
-            mode="lines",
-            name="Payoff",
-            line=dict(width=3)
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=payoff_df["UnderlyingPrice"],
+                y=payoff_df["PnL"],
+                mode="lines",
+                name="Payoff",
+                line=dict(width=3),
+            )
+        )
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
         fig.add_vline(x=float(spot_price), line_dash="dot", line_color="orange")
         fig.update_layout(
             title=f"Expiry Payoff — {symbol}",
             xaxis_title="Underlying Price at Expiry",
             yaxis_title="Profit / Loss",
-            height=520
+            height=520,
         )
         st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
+
 st.markdown("### OI by Strike")
 
 oi_chart_df = chain_df[["strikePrice", "CE_OI", "PE_OI"]].copy()
@@ -292,6 +343,6 @@ fig_oi.update_layout(
     height=500,
     xaxis_title="Strike",
     yaxis_title="Open Interest",
-    title=f"Open Interest Distribution — {symbol}"
+    title=f"Open Interest Distribution — {symbol}",
 )
 st.plotly_chart(fig_oi, use_container_width=True)
