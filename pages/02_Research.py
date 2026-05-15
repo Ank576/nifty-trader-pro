@@ -143,14 +143,14 @@ def build_strategy(current_price, fair_value, support_50dma, support_200dma):
     stagger_3 = fair_value * 0.60
 
     if current_price < fair_value * 0.75:
-        horizon = "3–5 years"
-        review_window = "Accumulate over 2–6 weeks"
+        horizon = "3-5 years"
+        review_window = "Accumulate over 2-6 weeks"
     elif current_price < fair_value:
-        horizon = "2–4 years"
-        review_window = "Accumulate over 4–8 weeks"
+        horizon = "2-4 years"
+        review_window = "Accumulate over 4-8 weeks"
     else:
         horizon = "Wait for better valuation comfort before long-term entry"
-        review_window = "Review weekly for 1–8 weeks"
+        review_window = "Review weekly for 1-8 weeks"
 
     return {
         "ideal_low": ideal_low,
@@ -162,7 +162,6 @@ def build_strategy(current_price, fair_value, support_50dma, support_200dma):
         "horizon": horizon,
         "review_window": review_window,
     }
-
 
 with st.sidebar:
     st.header("Inputs")
@@ -176,7 +175,12 @@ with st.sidebar:
     use_auto_growth = st.toggle("Use detected earnings growth when available", value=True)
     st.caption("Best suited for profitable, mature, fundamentally stable businesses.")
 
-symbol = ticker_input.strip().upper()
+# Normalize ticker: auto-append .NS for Indian stocks
+raw_symbol = ticker_input.strip()
+if "." not in raw_symbol and not raw_symbol.startswith("^"):
+    symbol = f"{raw_symbol.upper()}.NS"
+else:
+    symbol = raw_symbol.upper()
 
 try:
     info, price_hist, financials, balance_sheet = fetch_stock_data(symbol)
@@ -202,9 +206,9 @@ st.subheader(f"{name} ({symbol})")
 st.caption(f"Sector: {metrics['sector'] or '—'}")
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Current Price", format_num(current_price, prefix="₹"))
-m2.metric("EPS", format_num(metrics["eps"], prefix="₹"))
-m3.metric("Book Value / Share", format_num(metrics["book_value"], prefix="₹"))
+m1.metric("Current Price", format_num(current_price, prefix="Rs. "))
+m2.metric("EPS", format_num(metrics["eps"], prefix="Rs. "))
+m3.metric("Book Value / Share", format_num(metrics["book_value"], prefix="Rs. "))
 m4.metric("Growth Used", format_num(used_growth, suffix="%"))
 
 m5, m6, m7, m8 = st.columns(4)
@@ -219,7 +223,14 @@ left, right = st.columns([1.2, 0.8])
 
 with left:
     st.subheader("Intrinsic Value")
-    val_df = pd.DataFrame([
+
+    # Safe dataframe rendering - pre-format values instead of using Styler
+    def fmt(x):
+        if pd.notnull(x) and isinstance(x, (int, float, np.floating, np.integer)):
+            return f"Rs. {x:,.2f}"
+        return "—"
+
+    display_val_df = pd.DataFrame([
         ["Graham Number", fair_graham],
         ["EPS-based Fair Value", fair_eps],
         ["Blended Fair Value", blended_fair],
@@ -227,7 +238,8 @@ with left:
         ["MOS 25%", bands.get("MOS 25%")],
         ["MOS 40%", bands.get("MOS 40%")],
     ], columns=["Method", "Value"])
-    st.dataframe(val_df.style.format({"Value": "₹{:,.2f}"}), use_container_width=True)
+    display_val_df["Value"] = display_val_df["Value"].apply(fmt)
+    st.dataframe(display_val_df, use_container_width=True)
 
     if price_hist is not None and not price_hist.empty:
         hist = price_hist.copy().reset_index()
@@ -249,11 +261,10 @@ with left:
             height=420,
             margin=dict(l=10, r=10, t=20, b=10),
             xaxis_title="",
-            yaxis_title="Price (₹)",
+            yaxis_title="Price (Rs.)",
             hovermode="x unified",
         )
         st.plotly_chart(fig, use_container_width=True)
-
 with right:
     st.subheader("Investment View")
     if blended_fair is None:
@@ -263,9 +274,9 @@ with right:
 
     if strategy:
         st.markdown("### Entry Strategy")
-        st.markdown(f"- Ideal buy zone: **₹{strategy['ideal_low']:,.2f} – ₹{strategy['ideal_high']:,.2f}**")
-        st.markdown(f"- Buy below: **₹{strategy['buy_below']:,.2f}**")
-        st.markdown(f"- Staggered allocation: **30%** near ₹{strategy['stagger_1']:,.2f}, **30%** near ₹{strategy['stagger_2']:,.2f}, **40%** near ₹{strategy['stagger_3']:,.2f}")
+        st.markdown(f"- Ideal buy zone: **Rs. {strategy['ideal_low']:,.2f} - Rs. {strategy['ideal_high']:,.2f}**")
+        st.markdown(f"- Buy below: **Rs. {strategy['buy_below']:,.2f}**")
+        st.markdown(f"- Staggered allocation: **30%** near Rs. {strategy['stagger_1']:,.2f}, **30%** near Rs. {strategy['stagger_2']:,.2f}, **40%** near Rs. {strategy['stagger_3']:,.2f}")
         st.markdown(f"- Suggested holding horizon: **{strategy['horizon']}**")
         st.markdown(f"- Time window: **{strategy['review_window']}**")
 
@@ -288,14 +299,17 @@ st.divider()
 
 st.subheader("Research Notes")
 upside = ((blended_fair / current_price) - 1) * 100 if current_price and blended_fair else None
-notes_df = pd.DataFrame([
-    ["Current Price", current_price],
-    ["Blended Fair Value", blended_fair],
-    ["Upside / Downside to Fair Value (%)", upside],
-    ["50 DMA", metrics["support_50dma"]],
-    ["200 DMA", metrics["support_200dma"]],
-    ["Market Cap", metrics["market_cap"]],
-], columns=["Metric", "Value"])
+
+# Safe notes dataframe rendering
+notes_data = [
+    ["Current Price", format_num(current_price, prefix="Rs. ")],
+    ["Blended Fair Value", format_num(blended_fair, prefix="Rs. ")],
+    ["Upside / Downside to Fair Value (%)", f"{upside:,.2f}%" if upside is not None else "—"],
+    ["50 DMA", format_num(metrics["support_50dma"], prefix="Rs. ")],
+    ["200 DMA", format_num(metrics["support_200dma"], prefix="Rs. ")],
+    ["Market Cap", format_num(metrics["market_cap"], prefix="Rs. ")],
+]
+notes_df = pd.DataFrame(notes_data, columns=["Metric", "Value"])
 st.dataframe(notes_df, use_container_width=True)
 
 st.info("This page is a screening and planning tool, not investment advice. Confirm numbers against company filings before acting.")
