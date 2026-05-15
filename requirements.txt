@@ -10,3 +10,4 @@ ta>=0.11.0
 schedule>=1.2.2
 pyotp>=2.9.0
 scipy>=1.13.0
+yfinance>=0.2.40
