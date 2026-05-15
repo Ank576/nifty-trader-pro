@@ -1,8 +1,9 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+import time
 import requests
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
 
 st.set_page_config(page_title="Options", page_icon="🎯", layout="wide")
 
@@ -15,33 +16,52 @@ POPULAR_SYMBOLS = [
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.nseindia.com/option-chain"
+    "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.nseindia.com/option-chain",
+    "Connection": "keep-alive",
 }
 
 
 def get_nse_session():
     session = requests.Session()
     session.headers.update(HEADERS)
-    session.get("https://www.nseindia.com/option-chain", timeout=10)
     return session
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_option_chain(symbol: str):
     symbol = symbol.upper().strip()
     session = get_nse_session()
 
-    if symbol in INDEX_SYMBOLS:
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    else:
-        url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+    warmup_urls = [
+        "https://www.nseindia.com/",
+        "https://www.nseindia.com/option-chain"
+    ]
 
-    response = session.get(url, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    for warmup_url in warmup_urls:
+        try:
+            session.get(warmup_url, timeout=20)
+        except Exception:
+            pass
+
+    if symbol in INDEX_SYMBOLS:
+        api_url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+    else:
+        api_url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+
+    last_error = None
+    for _ in range(3):
+        try:
+            response = session.get(api_url, timeout=20)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            last_error = e
+            time.sleep(1.5)
+
+    raise last_error
 
 
 def parse_option_chain(data, selected_expiry=None):
@@ -63,8 +83,8 @@ def parse_option_chain(data, selected_expiry=None):
             continue
 
         strike = item.get("strikePrice")
-        ce = item.get("CE", {})
-        pe = item.get("PE", {})
+        ce = item.get("CE", {}) or {}
+        pe = item.get("PE", {}) or {}
 
         rows.append({
             "strikePrice": strike,
@@ -90,7 +110,12 @@ def parse_option_chain(data, selected_expiry=None):
             "PE_OI": pe.get("openInterest"),
         })
 
-    df = pd.DataFrame(rows).sort_values("strikePrice").reset_index(drop=True)
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df, underlying_value, timestamp, expiry_dates
+
+    df = df.sort_values("strikePrice").reset_index(drop=True)
     return df, underlying_value, timestamp, expiry_dates
 
 
@@ -132,20 +157,23 @@ with st.sidebar:
     custom_symbol = st.text_input("Or type symbol", value=selected_symbol)
     symbol = custom_symbol.upper().strip() if custom_symbol else selected_symbol
 
-try:
-    option_chain_json = fetch_option_chain(symbol)
-    temp_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json)
+with st.spinner(f"Fetching option chain for {symbol}..."):
+    try:
+        option_chain_json = fetch_option_chain(symbol)
+        temp_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json)
 
-    if not expiry_dates:
-        st.error("No expiry dates found for this symbol.")
+        if not expiry_dates:
+            st.error(f"No expiry dates found for {symbol}.")
+            st.stop()
+
+        selected_expiry = st.sidebar.selectbox("Expiry", expiry_dates, index=0)
+        chain_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json, selected_expiry)
+
+    except Exception as e:
+        st.error(f"NSE option-chain fetch failed for {symbol}. This is usually a temporary NSE timeout or session issue.")
+        st.caption(str(e))
+        st.info("Try again in a few seconds. If it keeps failing, switch symbol once and return to NIFTY.")
         st.stop()
-
-    selected_expiry = st.sidebar.selectbox("Expiry", expiry_dates, index=0)
-    chain_df, spot_price, chain_timestamp, expiry_dates = parse_option_chain(option_chain_json, selected_expiry)
-
-except Exception as e:
-    st.error(f"Unable to fetch NSE option chain for {symbol}: {e}")
-    st.stop()
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Underlying", symbol)
@@ -153,21 +181,27 @@ c2.metric("Spot", f"{spot_price:,.2f}" if spot_price else "N/A")
 c3.metric("Timestamp", chain_timestamp if chain_timestamp else "N/A")
 
 st.subheader(f"Option Chain — {symbol} — {selected_expiry}")
+
+if chain_df.empty:
+    st.warning("No option chain rows available for the selected expiry.")
+    st.stop()
+
 st.dataframe(chain_df, use_container_width=True, height=520)
 
-if not chain_df.empty:
-    atm_idx = (chain_df["strikePrice"] - spot_price).abs().idxmin()
-    atm_strike = chain_df.loc[atm_idx, "strikePrice"]
+atm_idx = (chain_df["strikePrice"] - spot_price).abs().idxmin() if spot_price else 0
+atm_strike = chain_df.loc[atm_idx, "strikePrice"]
 
-    st.markdown("### ATM Snapshot")
-    a1, a2, a3, a4 = st.columns(4)
-    a1.metric("ATM Strike", f"{atm_strike:,.2f}")
-    a2.metric("ATM CE LTP", f"{chain_df.loc[atm_idx, 'CE_LTP']}")
-    a3.metric("ATM PE LTP", f"{chain_df.loc[atm_idx, 'PE_LTP']}")
-    a4.metric("ATM Total OI", f"{(chain_df.loc[atm_idx, 'CE_OI'] or 0) + (chain_df.loc[atm_idx, 'PE_OI'] or 0):,}")
+st.markdown("### ATM Snapshot")
+a1, a2, a3, a4 = st.columns(4)
+a1.metric("ATM Strike", f"{atm_strike:,.2f}")
+a2.metric("ATM CE LTP", f"{chain_df.loc[atm_idx, 'CE_LTP']}")
+a3.metric("ATM PE LTP", f"{chain_df.loc[atm_idx, 'PE_LTP']}")
+a4.metric(
+    "ATM Total OI",
+    f"{(chain_df.loc[atm_idx, 'CE_OI'] or 0) + (chain_df.loc[atm_idx, 'PE_OI'] or 0):,}"
+)
 
 st.divider()
-
 st.subheader("Build Strategy")
 
 if "option_legs" not in st.session_state:
@@ -183,12 +217,15 @@ with st.form("add_leg_form"):
     with f2:
         leg_side = st.selectbox("Side", ["Buy", "Sell"])
     with f3:
-        leg_strike = st.selectbox("Strike", available_strikes, index=available_strikes.index(atm_strike) if atm_strike in available_strikes else 0)
+        default_strike_index = available_strikes.index(atm_strike) if atm_strike in available_strikes else 0
+        leg_strike = st.selectbox("Strike", available_strikes, index=default_strike_index)
     with f4:
         leg_qty = st.number_input("Qty", min_value=1, value=1, step=1)
     with f5:
-        default_premium = chain_df.loc[chain_df["strikePrice"] == leg_strike, "CE_LTP" if leg_type == "CE" else "PE_LTP"].iloc[0]
-        leg_premium = st.number_input("Premium", min_value=0.0, value=float(default_premium or 0.0), step=0.05)
+        premium_col = "CE_LTP" if leg_type == "CE" else "PE_LTP"
+        premium_series = chain_df.loc[chain_df["strikePrice"] == leg_strike, premium_col]
+        default_premium = float(premium_series.iloc[0]) if not premium_series.empty and pd.notna(premium_series.iloc[0]) else 0.0
+        leg_premium = st.number_input("Premium", min_value=0.0, value=default_premium, step=0.05)
 
     add_leg = st.form_submit_button("Add Leg")
 
@@ -222,7 +259,7 @@ with right:
     if legs_df.empty:
         st.info("Add one or more legs to generate payoff.")
     else:
-        payoff_df = compute_payoff(legs_df, spot_reference=spot_price, lot_size=1)
+        payoff_df = compute_payoff(legs_df, spot_reference=float(spot_price), lot_size=1)
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -233,7 +270,7 @@ with right:
             line=dict(width=3)
         ))
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig.add_vline(x=spot_price, line_dash="dot", line_color="orange")
+        fig.add_vline(x=float(spot_price), line_dash="dot", line_color="orange")
         fig.update_layout(
             title=f"Expiry Payoff — {symbol}",
             xaxis_title="Underlying Price at Expiry",
@@ -243,8 +280,8 @@ with right:
         st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
-
 st.markdown("### OI by Strike")
+
 oi_chart_df = chain_df[["strikePrice", "CE_OI", "PE_OI"]].copy()
 
 fig_oi = go.Figure()
